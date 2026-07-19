@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#09111f" />
+    <title>LFM2.5-VL Region Classifier</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to workspace</a>
+
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">Selected-region vision inference</p>
+        <h1>LFM2.5-VL Classifier</h1>
+        <p class="header-copy">Draw around one object and inspect the complete inference path.</p>
+      </div>
+      <div id="healthPill" class="health-pill" role="status" aria-live="polite">
+        <span class="health-dot" aria-hidden="true"></span>
+        <span id="healthText">Connecting</span>
+      </div>
+    </header>
+
+    <main id="workspace">
+      <section class="surface controls" aria-labelledby="controlsTitle">
+        <h2 id="controlsTitle" class="sr-only">Classifier controls</h2>
+
+        <div class="file-control">
+          <span class="control-label">Image</span>
+          <label class="file-picker" for="file">
+            <span class="file-button">Choose image</span>
+            <span id="fileName" class="file-name">No file selected</span>
+          </label>
+          <input id="file" type="file" accept="image/*" capture="environment" />
+        </div>
+
+        <label>
+          <span class="control-label">Selection shape</span>
+          <select id="shape">
+            <option value="rect">Rectangle</option>
+            <option value="circle">Circle</option>
+          </select>
+        </label>
+
+        <div class="control-actions">
+          <button id="retry" class="button primary" type="button" disabled>Classify again</button>
+          <button id="cancel" class="button" type="button" disabled>Cancel</button>
+        </div>
+      </section>
+
+      <section class="surface status-panel" aria-labelledby="statusTitle">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Live request</p>
+            <h2 id="statusTitle">Inference pipeline</h2>
+          </div>
+          <output id="elapsed" class="elapsed">0 ms</output>
+        </div>
+        <p id="status" class="status-message" role="status" aria-live="polite">
+          Choose an image, then draw around one object.
+        </p>
+        <progress
+          id="progressTrack"
+          class="progress-track"
+          aria-label="Inference progress"
+          max="100"
+          value="0"
+        ></progress>
+        <ol id="pipeline" class="pipeline">
+          <li data-stage="accepted">Accepted</li>
+          <li data-stage="decode">Decode</li>
+          <li data-stage="crop">Crop</li>
+          <li data-stage="encode">Encode</li>
+          <li data-stage="queued">Queue</li>
+          <li data-stage="inference">Inference</li>
+          <li data-stage="complete">Complete</li>
+        </ol>
+      </section>
+
+      <section class="metric-grid" aria-label="Latest inference metrics">
+        <article class="metric-card">
+          <span>Result</span>
+          <strong id="label">—</strong>
+        </article>
+        <article class="metric-card">
+          <span>Mean token probability</span>
+          <strong id="probability">—</strong>
+        </article>
+        <article class="metric-card">
+          <span>Selected / crop</span>
+          <strong id="coverage">—</strong>
+        </article>
+        <article class="metric-card">
+          <span>Total</span>
+          <strong id="backendTime">—</strong>
+        </article>
+        <article class="metric-card">
+          <span>Engine HTTP</span>
+          <strong id="engineTime">—</strong>
+        </article>
+        <article class="metric-card">
+          <span>Queue wait</span>
+          <strong id="queueTime">—</strong>
+        </article>
+      </section>
+
+      <div class="workspace-grid">
+        <section class="surface image-panel" aria-labelledby="imageTitle">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Input</p>
+              <h2 id="imageTitle">Image workspace</h2>
+            </div>
+            <span id="imageDimensions" class="subtle">No image</span>
+          </div>
+
+          <div id="canvasShell" class="canvas-shell empty">
+            <canvas
+              id="canvas"
+              tabindex="0"
+              aria-label="Image selection canvas. Draw with a pointer, or use the coordinate controls below."
+            ></canvas>
+            <p id="canvasPlaceholder" class="canvas-placeholder">Upload an image to begin.</p>
+          </div>
+
+          <div class="legend">
+            <span><i class="legend-swatch selection"></i>User selection</span>
+            <span><i class="legend-swatch crop"></i>Padded model crop</span>
+          </div>
+
+          <details class="coordinate-panel">
+            <summary>Keyboard-accessible coordinates</summary>
+            <div class="coordinate-grid">
+              <label
+                >X1 % <input id="x1" type="number" min="0" max="100" step="0.1" value="20"
+              /></label>
+              <label
+                >Y1 % <input id="y1" type="number" min="0" max="100" step="0.1" value="20"
+              /></label>
+              <label
+                >X2 % <input id="x2" type="number" min="0" max="100" step="0.1" value="80"
+              /></label>
+              <label
+                >Y2 % <input id="y2" type="number" min="0" max="100" step="0.1" value="80"
+              /></label>
+            </div>
+            <button id="applyCoordinates" class="button" type="button" disabled>
+              Apply and classify
+            </button>
+          </details>
+
+          <div class="crop-preview-wrap">
+            <div class="section-heading compact">
+              <h3 id="cropPreviewTitle">Model crop preview</h3>
+              <span id="cropDimensions" class="subtle">—</span>
+            </div>
+            <canvas id="cropPreview" class="crop-preview"
+              >Preview of the padded crop sent to the model.</canvas
+            >
+          </div>
+        </section>
+
+        <aside class="diagnostics-column" aria-label="Runtime diagnostics">
+          <section class="surface" aria-labelledby="hardwareTitle">
+            <div class="section-heading compact">
+              <div>
+                <p class="eyebrow">Runtime</p>
+                <h2 id="hardwareTitle">Hardware</h2>
+              </div>
+              <span id="deviceBadge" class="badge">—</span>
+            </div>
+            <p id="hardwareSummary" class="summary-copy">Loading system metadata…</p>
+            <dl id="hardwareFacts" class="fact-grid"></dl>
+          </section>
+
+          <section class="surface" aria-labelledby="timingTitle">
+            <div class="section-heading compact">
+              <div>
+                <p class="eyebrow">Latest request</p>
+                <h2 id="timingTitle">Timing breakdown</h2>
+              </div>
+            </div>
+            <div id="timingBars" class="timing-bars">
+              <p class="empty-copy">Run a classification to populate timings.</p>
+            </div>
+          </section>
+
+          <section class="surface" aria-labelledby="engineTitle">
+            <div class="section-heading compact">
+              <div>
+                <p class="eyebrow">Configuration</p>
+                <h2 id="engineTitle">Model and engine</h2>
+              </div>
+            </div>
+            <dl id="engineFacts" class="fact-grid"></dl>
+          </section>
+
+          <section class="surface" aria-labelledby="eventsTitle">
+            <div class="section-heading compact">
+              <div>
+                <p class="eyebrow">Trace</p>
+                <h2 id="eventsTitle">Event log</h2>
+              </div>
+              <button id="clearEvents" class="button small" type="button">Clear</button>
+            </div>
+            <ol id="eventLog" class="event-log">
+              <li class="empty-copy">No request events yet.</li>
+            </ol>
+          </section>
+        </aside>
+      </div>
+
+      <section class="surface details-panel" aria-labelledby="generationTitle">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Output</p>
+            <h2 id="generationTitle">Generation details</h2>
+          </div>
+          <button id="copyResult" class="button small" type="button" disabled>Copy result</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <tbody id="generation">
+              <tr>
+                <th>State</th>
+                <td>No result yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="surface debug-panel" aria-labelledby="debugTitle">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Raw diagnostics</p>
+            <h2 id="debugTitle">Debug data</h2>
+          </div>
+          <button id="copyDebug" class="button small" type="button" disabled>Copy all</button>
+        </div>
+        <p class="summary-copy">
+          Structured cards above are the primary view. Raw payloads remain available for exact
+          inspection.
+        </p>
+        <details open>
+          <summary>Latest result</summary>
+          <pre id="rawResult" class="json-view"><code>No result yet.</code></pre>
+        </details>
+        <details>
+          <summary>Backend health and configuration</summary>
+          <pre id="rawHealth" class="json-view"><code>Loading…</code></pre>
+        </details>
+      </section>
+    </main>
+  </body>
+</html>

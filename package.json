@@ -1,0 +1,24 @@
+{
+  "name": "lfm25-vl-region-classifier-ui",
+  "version": "2.1.0",
+  "private": true,
+  "description": "Development quality tools for the static classifier frontend",
+  "scripts": {
+    "format": "prettier --write index.html static/app.css static/app.js package.json eslint.config.mjs stylelint.config.mjs .htmlvalidate.json",
+    "format:check": "prettier --check index.html static/app.css static/app.js package.json eslint.config.mjs stylelint.config.mjs .htmlvalidate.json",
+    "lint:js": "eslint static/app.js",
+    "lint:css": "stylelint static/app.css",
+    "lint:html": "html-validate index.html",
+    "lint": "npm run lint:js && npm run lint:css && npm run lint:html",
+    "check": "npm run format:check && npm run lint"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.7.0",
+    "globals": "17.7.0",
+    "html-validate": "10.10.0",
+    "prettier": "3.9.5",
+    "stylelint": "17.14.0",
+    "stylelint-config-standard": "40.0.0"
+  }
+}
