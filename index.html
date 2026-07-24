@@ -3,9 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Upload an image, select a region, and inspect streamed LFM2.5-VL classification results, timings, and runtime diagnostics."
+    />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#09111f" />
     <title>LFM2.5-VL Region Classifier</title>
+    <link
+      rel="preload"
+      href="/assets/font/Inter-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <link rel="stylesheet" href="/assets/app.css" />
     <script src="/assets/app.js" defer></script>
   </head>
@@ -120,7 +131,7 @@
           <div id="canvasShell" class="canvas-shell empty">
             <canvas
               id="canvas"
-              tabindex="0"
+              role="img"
               aria-label="Image selection canvas. Draw with a pointer, or use the coordinate controls below."
             ></canvas>
             <p id="canvasPlaceholder" class="canvas-placeholder">Upload an image to begin.</p>
@@ -157,7 +168,11 @@
               <h3 id="cropPreviewTitle">Model crop preview</h3>
               <span id="cropDimensions" class="subtle">—</span>
             </div>
-            <canvas id="cropPreview" class="crop-preview"
+            <canvas
+              id="cropPreview"
+              class="crop-preview"
+              role="img"
+              aria-labelledby="cropPreviewTitle"
               >Preview of the padded crop sent to the model.</canvas
             >
           </div>
@@ -222,10 +237,10 @@
           <button id="copyResult" class="button small" type="button" disabled>Copy result</button>
         </div>
         <div class="table-wrap">
-          <table>
+          <table aria-labelledby="generationTitle">
             <tbody id="generation">
               <tr>
-                <th>State</th>
+                <th scope="row">State</th>
                 <td>No result yet.</td>
               </tr>
             </tbody>

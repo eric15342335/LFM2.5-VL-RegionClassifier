@@ -22,8 +22,7 @@ workers would each launch another model server.
 ## Deployment defaults
 
 - `THREADS=4` and `CONCURRENCY=2`.
-- `Q4_K_M` remains the default because the supplied benchmark indicates prompt processing
-  dominates this short-output workload.
+- `Q4_K_M` is the default model quantization.
 - `REQUEST_TIMEOUT=300` covers backend-to-engine HTTP requests. Configure reverse-proxy
   timeouts separately.
 - Bilinear downsampling is used by default. Small crops are not upscaled.

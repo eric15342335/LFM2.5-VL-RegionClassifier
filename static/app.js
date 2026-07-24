@@ -402,6 +402,7 @@ function renderRows(entries) {
     const row = document.createElement("tr");
     const key = document.createElement("th");
     const cell = document.createElement("td");
+    key.scope = "row";
     setText(key, name);
     setText(cell, typeof value === "string" ? value : JSON.stringify(value, null, 2));
     if (raw) cell.className = "raw-cell";

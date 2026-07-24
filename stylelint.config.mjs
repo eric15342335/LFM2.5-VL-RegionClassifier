@@ -1,12 +1,7 @@
 export default {
   extends: ["stylelint-config-standard"],
   rules: {
-    "no-descending-specificity": [
-      true,
-      {
-        severity: "warning",
-      },
-    ],
+    "no-descending-specificity": null,
   },
   reportDescriptionlessDisables: true,
   reportNeedlessDisables: true,

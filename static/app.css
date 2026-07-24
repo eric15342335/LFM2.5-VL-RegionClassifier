@@ -19,6 +19,7 @@
     "Segoe UI",
     sans-serif;
   font-synthesis: none;
+
   --bg: #07101d;
   --surface: #101a2a;
   --surface-soft: #142137;
@@ -34,6 +35,7 @@
   --warning: #fbbf24;
   --danger: #fb7185;
   --shadow: 0 20px 55px rgb(0 0 0 / 24%);
+
   background: var(--bg);
   color: var(--text);
 }
@@ -70,10 +72,10 @@ input[type="number"] {
   border-radius: 10px;
 }
 
+.file-control:focus-within .file-picker,
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
-canvas:focus-visible,
 summary:focus-visible,
 a:focus-visible {
   outline: 3px solid rgb(115 169 255 / 75%);
@@ -794,7 +796,7 @@ td {
   color: #8999ae;
 }
 
-@media (max-width: 1120px) {
+@media (width <= 1120px) {
   .metric-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -808,7 +810,7 @@ td {
   }
 }
 
-@media (max-width: 760px) {
+@media (width <= 760px) {
   body {
     padding: 12px;
   }
@@ -852,7 +854,7 @@ td {
   }
 }
 
-@media (max-width: 430px) {
+@media (width <= 430px) {
   .surface {
     padding: 13px;
   }
