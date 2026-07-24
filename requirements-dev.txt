@@ -1,4 +1,0 @@
--r requirements.txt
-isort
-pytest
-ruff

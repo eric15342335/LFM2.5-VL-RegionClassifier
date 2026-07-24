@@ -55,6 +55,9 @@ let drawing = false;
 let latest = null;
 let healthData = null;
 let controller = null;
+let uploadController = null;
+let imageSessionId = null;
+let imageLoadSequence = 0;
 let requestSequence = 0;
 let requestStarted = 0;
 let timer = null;
@@ -271,7 +274,7 @@ function stopTimer() {
 }
 
 function setBusy(busy) {
-  element.retry.disabled = busy || !bitmap || !start || !end;
+  element.retry.disabled = busy || !bitmap || !imageSessionId || !start || !end;
   element.cancel.disabled = !busy;
   element.file.disabled = busy;
   element.shape.disabled = busy;
@@ -360,7 +363,7 @@ function renderEngine(health) {
 
 function renderTimings(performanceData) {
   const entries = [
-    ["Read upload", performanceData.upload_read_ms],
+    ["Session lookup", performanceData.session_lookup_ms],
     ["Decode", performanceData.decode_ms],
     ["Crop", performanceData.crop_ms],
     ["Encode", performanceData.encode_ms],
@@ -468,6 +471,7 @@ function render(result, roundTrip) {
     ["Engine timings", result.generation.engine_timings, true],
     ["Selection box", result.selection.box, true],
     ["Crop box", result.crop.crop_box, true],
+    ["Image session ID", result.image_session_id, true],
     ["Request ID", result.request_id, true],
   ]);
   renderJson(element.rawResult, latest);
@@ -543,7 +547,9 @@ async function consumeNdjson(response, currentRequest) {
     } else if (event.event === "result") {
       result = event.result;
     } else if (event.event === "error") {
-      throw new Error(event.message || `Request failed with status ${event.status}`);
+      const error = new Error(event.message || `Request failed with status ${event.status}`);
+      error.status = event.status;
+      throw error;
     }
   }
 
@@ -560,9 +566,61 @@ async function consumeNdjson(response, currentRequest) {
   return result;
 }
 
+async function stageImage(file, signal) {
+  const data = new FormData();
+  data.append("image", file);
+  const response = await fetch("/image-sessions", {
+    method: "POST",
+    body: data,
+    signal,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    let message = text || response.statusText;
+    try {
+      message = JSON.parse(text).detail || message;
+    } catch {
+      // The plain response body is already the most useful message.
+    }
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
+
+function releaseImageSession(sessionId) {
+  if (!sessionId) return;
+  fetch(`/image-sessions/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+    keepalive: true,
+  }).catch(() => {
+    // TTL cleanup is authoritative; deletion is only an eager optimization.
+  });
+}
+
+function cancelActiveRequest() {
+  controller?.abort();
+  uploadController?.abort();
+}
+
+async function requestClassification(selection, currentRequest) {
+  const data = new FormData();
+  data.append("session_id", imageSessionId);
+  data.append("shape", element.shape.value);
+  for (const [key, value] of Object.entries(selection)) data.append(key, String(value));
+
+  const response = await fetch("/classify/stream", {
+    method: "POST",
+    body: data,
+    signal: controller.signal,
+  });
+  return consumeNdjson(response, currentRequest);
+}
+
 async function classify() {
   const file = element.file.files[0];
-  if (!file || !start || !end) return;
+  if (!file || !imageSessionId || !start || !end) return;
   const selection = normalizedSelection();
   if (selection.x2 - selection.x1 < 0.01 || selection.y2 - selection.y1 < 0.01) {
     element.status.classList.add("error");
@@ -580,18 +638,21 @@ async function classify() {
   setProgress("accepted", 2, "Sending request…");
   startTimer();
 
-  const data = new FormData();
-  data.append("image", file);
-  data.append("shape", element.shape.value);
-  for (const [key, value] of Object.entries(selection)) data.append(key, String(value));
-
   try {
-    const response = await fetch("/classify/stream", {
-      method: "POST",
-      body: data,
-      signal: controller.signal,
-    });
-    const result = await consumeNdjson(response, currentRequest);
+    let result;
+    try {
+      result = await requestClassification(selection, currentRequest);
+    } catch (error) {
+      if (error.status !== 404 || currentRequest !== requestSequence) throw error;
+      setProgress("accepted", 2, "Image session expired; uploading once more…");
+      const session = await stageImage(file, controller.signal);
+      if (currentRequest !== requestSequence) {
+        releaseImageSession(session.session_id);
+        return;
+      }
+      imageSessionId = session.session_id;
+      result = await requestClassification(selection, currentRequest);
+    }
     if (currentRequest !== requestSequence) return;
     const roundTrip = performance.now() - requestStarted;
     render(result, roundTrip);
@@ -636,8 +697,58 @@ async function loadHealth() {
 async function loadImage(file) {
   controller?.abort();
   requestSequence += 1;
-  if (bitmap) bitmap.close();
-  bitmap = await createImageBitmap(file);
+  uploadController?.abort();
+  uploadController = new AbortController();
+  imageLoadSequence += 1;
+  const currentLoad = imageLoadSequence;
+  const oldSessionId = imageSessionId;
+  imageSessionId = null;
+  releaseImageSession(oldSessionId);
+  if (bitmap) {
+    bitmap.close();
+    bitmap = null;
+  }
+
+  element.canvas.width = 1;
+  element.canvas.height = 1;
+  element.canvasShell.classList.add("empty");
+  element.canvasPlaceholder.hidden = false;
+  setText(element.fileName, file.name);
+  setText(element.imageDimensions, `${formatBytes(file.size)} · uploading`);
+  setBusy(true);
+  element.status.classList.remove("error");
+  setText(element.status, "Uploading image and preparing the local preview…");
+
+  const [bitmapResult, sessionResult] = await Promise.allSettled([
+    createImageBitmap(file, { imageOrientation: "from-image" }),
+    stageImage(file, uploadController.signal),
+  ]);
+
+  if (currentLoad !== imageLoadSequence) {
+    if (bitmapResult.status === "fulfilled") bitmapResult.value.close();
+    if (sessionResult.status === "fulfilled") releaseImageSession(sessionResult.value.session_id);
+    return;
+  }
+  uploadController = null;
+
+  if (bitmapResult.status === "rejected" || sessionResult.status === "rejected") {
+    if (bitmapResult.status === "fulfilled") bitmapResult.value.close();
+    if (sessionResult.status === "fulfilled") releaseImageSession(sessionResult.value.session_id);
+    throw (
+      (bitmapResult.status === "rejected" && bitmapResult.reason) ||
+      (sessionResult.status === "rejected" && sessionResult.reason)
+    );
+  }
+
+  bitmap = bitmapResult.value;
+  const session = sessionResult.value;
+  if (bitmap.width !== session.image.width || bitmap.height !== session.image.height) {
+    bitmap.close();
+    bitmap = null;
+    releaseImageSession(session.session_id);
+    throw new Error("Browser and server disagree on the image orientation");
+  }
+  imageSessionId = session.session_id;
   const scale = Math.min(1, 1200 / bitmap.width, 1200 / bitmap.height);
   element.canvas.width = Math.max(1, Math.round(bitmap.width * scale));
   element.canvas.height = Math.max(1, Math.round(bitmap.height * scale));
@@ -646,7 +757,7 @@ async function loadImage(file) {
   setText(element.fileName, file.name);
   setText(
     element.imageDimensions,
-    `${bitmap.width} × ${bitmap.height} · ${formatBytes(file.size)}`,
+    `${bitmap.width} × ${bitmap.height} · ${formatBytes(file.size)} · staged`,
   );
 
   start = null;
@@ -700,6 +811,11 @@ element.file.addEventListener("change", async () => {
   try {
     await loadImage(file);
   } catch (error) {
+    setBusy(false);
+    if (error.name === "AbortError") {
+      setText(element.status, "Image upload cancelled.");
+      return;
+    }
     element.status.classList.add("error");
     setText(element.status, `Could not open image: ${error}`);
   }
@@ -741,7 +857,7 @@ element.shape.addEventListener("change", () => {
 });
 
 element.retry.addEventListener("click", classify);
-element.cancel.addEventListener("click", () => controller?.abort());
+element.cancel.addEventListener("click", cancelActiveRequest);
 element.applyCoordinates.addEventListener("click", applyCoordinateInputs);
 element.clearEvents.addEventListener("click", clearEventLog);
 element.copyResult.addEventListener("click", () =>
@@ -753,8 +869,10 @@ element.copyDebug.addEventListener("click", () => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !element.cancel.disabled) controller?.abort();
+  if (event.key === "Escape" && !element.cancel.disabled) cancelActiveRequest();
 });
+
+window.addEventListener("pagehide", () => releaseImageSession(imageSessionId));
 
 (async () => {
   resetProgress();

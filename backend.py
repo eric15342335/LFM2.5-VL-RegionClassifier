@@ -13,22 +13,25 @@ import math
 import os
 import platform
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
 import uuid
+import warnings
 from asyncio.subprocess import Process
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections import OrderedDict
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Annotated, Any, Literal, TypeVar
 
 import httpx
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -71,6 +74,12 @@ class Settings:
     image_side: int = int(os.getenv("IMAGE_SIDE", "384"))
     jpeg_quality: int = int(os.getenv("JPEG_QUALITY", "88"))
     max_upload_bytes: int = int(os.getenv("MAX_BYTES", "15000000"))
+    max_image_pixels: int = int(os.getenv("MAX_IMAGE_PIXELS", "25000000"))
+    image_session_ttl: int = int(os.getenv("IMAGE_SESSION_TTL", "900"))
+    image_session_cache_bytes: int = int(
+        os.getenv("IMAGE_SESSION_CACHE_BYTES", str(256 * 1024 * 1024))
+    )
+    max_image_sessions: int = int(os.getenv("MAX_IMAGE_SESSIONS", "32"))
     request_timeout: float = float(os.getenv("REQUEST_TIMEOUT", "300"))
     startup_timeout: float = float(os.getenv("START_TIMEOUT", "600"))
     resample: str = os.getenv("RESAMPLE", "bilinear").lower()
@@ -97,6 +106,10 @@ class Settings:
             "CTX_PER_SLOT": self.context_tokens_per_slot,
             "IMAGE_SIDE": self.image_side,
             "MAX_BYTES": self.max_upload_bytes,
+            "MAX_IMAGE_PIXELS": self.max_image_pixels,
+            "IMAGE_SESSION_TTL": self.image_session_ttl,
+            "IMAGE_SESSION_CACHE_BYTES": self.image_session_cache_bytes,
+            "MAX_IMAGE_SESSIONS": self.max_image_sessions,
         }
         invalid = [name for name, value in positive.items() if value < 1]
         if invalid:
@@ -149,8 +162,8 @@ class Region:
 
     def validate(self) -> None:
         coordinates = (self.x1, self.y1, self.x2, self.y2)
-        if any(value < 0 or value > 1 for value in coordinates):
-            raise HTTPException(400, "Coordinates must be between 0 and 1")
+        if any(not math.isfinite(value) or value < 0 or value > 1 for value in coordinates):
+            raise HTTPException(400, "Coordinates must be finite and between 0 and 1")
         if self.width < 0.01 or self.height < 0.01:
             raise HTTPException(400, "Selected region is too small")
 
@@ -174,6 +187,119 @@ class Region:
 class PreparedImage:
     image: Image.Image
     details: dict[str, Any]
+
+
+@dataclass(slots=True)
+class ImageSession:
+    session_id: str
+    data: bytes
+    width: int
+    height: int
+    created_at: float
+    expires_at: float
+
+    @property
+    def upload_bytes(self) -> int:
+        return len(self.data)
+
+
+class ImageSessionStore:
+    """Bounded process-local storage for immutable uploaded image bytes."""
+
+    def __init__(
+        self,
+        max_bytes: int,
+        max_sessions: int,
+        ttl_seconds: int,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self.max_bytes = max_bytes
+        self.max_sessions = max_sessions
+        self.ttl_seconds = ttl_seconds
+        self._clock = clock
+        self._items: OrderedDict[str, ImageSession] = OrderedDict()
+        self._total_bytes = 0
+        self._lock = asyncio.Lock()
+
+    def _remove_unlocked(self, session_id: str) -> bool:
+        session = self._items.pop(session_id, None)
+        if session is None:
+            return False
+        self._total_bytes -= session.upload_bytes
+        return True
+
+    def _purge_expired_unlocked(self, now: float) -> None:
+        expired = [
+            session_id for session_id, session in self._items.items() if session.expires_at <= now
+        ]
+        for session_id in expired:
+            self._remove_unlocked(session_id)
+
+    async def put(
+        self,
+        data: bytes,
+        width: int,
+        height: int,
+    ) -> ImageSession:
+        if len(data) > self.max_bytes:
+            raise HTTPException(413, "Image is larger than the session cache capacity")
+
+        async with self._lock:
+            now = self._clock()
+            self._purge_expired_unlocked(now)
+            while self._items and (
+                len(self._items) >= self.max_sessions
+                or self._total_bytes + len(data) > self.max_bytes
+            ):
+                oldest_id = next(iter(self._items))
+                self._remove_unlocked(oldest_id)
+
+            session = ImageSession(
+                session_id=secrets.token_urlsafe(32),
+                data=data,
+                width=width,
+                height=height,
+                created_at=now,
+                expires_at=now + self.ttl_seconds,
+            )
+            self._items[session.session_id] = session
+            self._total_bytes += session.upload_bytes
+            return session
+
+    async def get(self, session_id: str) -> ImageSession:
+        async with self._lock:
+            now = self._clock()
+            self._purge_expired_unlocked(now)
+            session = self._items.get(session_id)
+            if session is None:
+                raise HTTPException(404, "Image session is missing or expired")
+            session.expires_at = now + self.ttl_seconds
+            self._items.move_to_end(session_id)
+            return session
+
+    async def delete(self, session_id: str) -> None:
+        async with self._lock:
+            self._remove_unlocked(session_id)
+
+    async def cleanup(self) -> None:
+        async with self._lock:
+            self._purge_expired_unlocked(self._clock())
+
+    async def clear(self) -> None:
+        async with self._lock:
+            self._items.clear()
+            self._total_bytes = 0
+
+    async def snapshot(self) -> dict[str, int]:
+        async with self._lock:
+            self._purge_expired_unlocked(self._clock())
+            return {
+                "sessions": len(self._items),
+                "bytes": self._total_bytes,
+                "max_sessions": self.max_sessions,
+                "max_bytes": self.max_bytes,
+                "ttl_seconds": self.ttl_seconds,
+            }
 
 
 @dataclass(slots=True)
@@ -218,7 +344,7 @@ class InferenceGate:
             return self._snapshot_unlocked()
 
     @asynccontextmanager
-    async def slot(self) -> AsyncIterator[dict[str, int]]:
+    async def slot(self) -> AsyncGenerator[dict[str, int], None]:
         acquired = False
         async with self._lock:
             self._waiting += 1
@@ -691,10 +817,21 @@ def prepare_crop(image: Image.Image, region: Region) -> PreparedImage:
 
 def decode_image_bytes(data: bytes) -> Image.Image:
     try:
-        with Image.open(BytesIO(data)) as source:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            source = Image.open(BytesIO(data), formats=["JPEG", "PNG", "WEBP"])
+        with source:
+            if source.width * source.height > SETTINGS.max_image_pixels:
+                raise HTTPException(413, "Image has too many decoded pixels")
+            if getattr(source, "is_animated", False):
+                raise HTTPException(400, "Animated images are not supported")
             return ImageOps.exif_transpose(source).convert("RGB")
+    except HTTPException:
+        raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
+        raise HTTPException(413, "Image has too many decoded pixels") from error
     except (OSError, ValueError) as error:
-        raise HTTPException(400, "Invalid image") from error
+        raise HTTPException(400, "Invalid or unsupported image") from error
 
 
 def encode_image(image: Image.Image) -> tuple[str, int, float]:
@@ -849,6 +986,11 @@ STATE = EngineState(
 )
 INFERENCE_GATE = InferenceGate(SETTINGS.concurrency)
 PREPROCESS_GATE = asyncio.Semaphore(SETTINGS.preprocess_concurrency)
+IMAGE_SESSIONS = ImageSessionStore(
+    SETTINGS.image_session_cache_bytes,
+    SETTINGS.max_image_sessions,
+    SETTINGS.image_session_ttl,
+)
 
 
 async def no_progress(
@@ -861,23 +1003,26 @@ async def no_progress(
 
 
 async def classify_pipeline(
-    upload: UploadFile,
+    session_id: str,
     selection: Region,
     progress: ProgressCallback = no_progress,
 ) -> dict[str, Any]:
     request_id = uuid.uuid4().hex[:12]
     request_started = perf_counter()
-    await progress("accepted", "Request accepted", 4, {"request_id": request_id})
+    await progress(
+        "accepted",
+        "Request accepted",
+        4,
+        {"request_id": request_id, "image_session_id": session_id},
+    )
 
-    read_started = perf_counter()
-    data = await upload.read(SETTINGS.max_upload_bytes + 1)
-    if len(data) > SETTINGS.max_upload_bytes:
-        raise HTTPException(413, "Image is too large")
-    upload_read_ms = (perf_counter() - read_started) * 1000
+    lookup_started = perf_counter()
+    session = await IMAGE_SESSIONS.get(session_id)
+    session_lookup_ms = (perf_counter() - lookup_started) * 1000
 
-    await progress("decode", "Decoding and orienting image", 14, None)
+    await progress("decode", "Decoding staged image", 14, None)
     decode_started = perf_counter()
-    source = await run_preprocess(decode_image_bytes, data)
+    source = await run_preprocess(decode_image_bytes, session.data)
     decode_ms = (perf_counter() - decode_started) * 1000
     await progress(
         "decode",
@@ -936,6 +1081,7 @@ async def classify_pipeline(
     request_total_ms = (perf_counter() - request_started) * 1000
     result = {
         "request_id": request_id,
+        "image_session_id": session.session_id,
         "label": generation["label"],
         "token_probability": generation["token_probability"],
         "selection": {
@@ -945,14 +1091,14 @@ async def classify_pipeline(
         "crop": crop.details,
         "generation": generation,
         "performance": {
-            "upload_read_ms": round(upload_read_ms, 3),
+            "session_lookup_ms": round(session_lookup_ms, 3),
             "decode_ms": round(decode_ms, 3),
             "crop_ms": crop.details["prepare_ms"],
             "encode_ms": encode_ms,
             "queue_wait_ms": round(queue_wait_ms, 3),
             "engine_http_ms": engine_http_ms,
             "request_total_ms": round(request_total_ms, 3),
-            "upload_bytes": len(data),
+            "source_upload_bytes": session.upload_bytes,
             "encoded_jpeg_bytes": jpeg_bytes,
         },
         "runtime": {
@@ -999,15 +1145,31 @@ def configuration_info() -> dict[str, Any]:
         "resampling": SETTINGS.resample,
         "jpeg_quality": SETTINGS.jpeg_quality,
         "logprobs_requested": SETTINGS.logprobs,
+        "max_upload_bytes": SETTINGS.max_upload_bytes,
+        "max_image_pixels": SETTINGS.max_image_pixels,
+        "image_session_ttl_seconds": SETTINGS.image_session_ttl,
+        "image_session_cache_bytes": SETTINGS.image_session_cache_bytes,
+        "max_image_sessions": SETTINGS.max_image_sessions,
     }
 
 
+async def image_session_sweeper() -> None:
+    interval = max(1.0, min(30.0, SETTINGS.image_session_ttl / 2))
+    while True:
+        await asyncio.sleep(interval)
+        await IMAGE_SESSIONS.cleanup()
+
+
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     await start_engine(STATE)
+    cleanup_task = asyncio.create_task(image_session_sweeper())
     try:
         yield
     finally:
+        cleanup_task.cancel()
+        await asyncio.gather(cleanup_task, return_exceptions=True)
+        await IMAGE_SESSIONS.clear()
         await stop_engine(STATE)
 
 
@@ -1018,7 +1180,7 @@ if SETTINGS.cors_origins:
     APP.add_middleware(
         CORSMiddleware,
         allow_origins=list(SETTINGS.cors_origins),
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["*"],
     )
 
@@ -1045,15 +1207,50 @@ async def health() -> dict[str, Any]:
         "configuration": configuration_info(),
         "hardware": hardware_info(STATE),
         "queue": await INFERENCE_GATE.snapshot(),
+        "image_sessions": await IMAGE_SESSIONS.snapshot(),
     }
+
+
+@APP.post("/image-sessions", status_code=201)
+async def create_image_session(
+    response: Response,
+    image: Annotated[UploadFile, File()],
+) -> dict[str, Any]:
+    data = await image.read(SETTINGS.max_upload_bytes + 1)
+    if len(data) > SETTINGS.max_upload_bytes:
+        raise HTTPException(413, "Image is too large")
+    if not data:
+        raise HTTPException(400, "Image is empty")
+
+    decoded = await run_preprocess(decode_image_bytes, data)
+    try:
+        width, height = decoded.size
+    finally:
+        decoded.close()
+    session = await IMAGE_SESSIONS.put(data, width, height)
+
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Location"] = f"/image-sessions/{session.session_id}"
+    return {
+        "session_id": session.session_id,
+        "image": {"width": width, "height": height},
+        "upload_bytes": session.upload_bytes,
+        "expires_in_seconds": SETTINGS.image_session_ttl,
+    }
+
+
+@APP.delete("/image-sessions/{session_id}", status_code=204)
+async def delete_image_session(session_id: str) -> Response:
+    await IMAGE_SESSIONS.delete(session_id)
+    return Response(status_code=204)
 
 
 @APP.post("/classify")
 async def classify(
-    image: Annotated[UploadFile, File()],
+    session_id: Annotated[str, Form()],
     selection: Annotated[Region, Depends(parse_region)],
 ) -> dict[str, Any]:
-    return await classify_pipeline(image, selection)
+    return await classify_pipeline(session_id, selection)
 
 
 def ndjson(payload: dict[str, Any]) -> bytes:
@@ -1063,7 +1260,7 @@ def ndjson(payload: dict[str, Any]) -> bytes:
 @APP.post("/classify/stream", response_class=StreamingResponse)
 async def classify_stream(
     request: Request,
-    image: Annotated[UploadFile, File()],
+    session_id: Annotated[str, Form()],
     selection: Annotated[Region, Depends(parse_region)],
 ) -> StreamingResponse:
     """Stream pipeline status events followed by one final result event."""
@@ -1091,7 +1288,7 @@ async def classify_stream(
 
         async def work() -> None:
             try:
-                result = await classify_pipeline(image, selection, report)
+                result = await classify_pipeline(session_id, selection, report)
                 queue.put_nowait({"event": "result", "result": result})
             except asyncio.CancelledError:
                 raise

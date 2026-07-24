@@ -9,14 +9,14 @@
     "lint:js": "eslint static/app.js",
     "lint:css": "stylelint static/app.css",
     "lint:html": "html-validate index.html",
-    "lint": "npm run lint:js && npm run lint:css && npm run lint:html",
-    "check": "npm run format:check && npm run lint"
+    "lint": "pnpm run lint:js && pnpm run lint:css && pnpm run lint:html",
+    "check": "pnpm run format:check && pnpm run lint"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "eslint": "10.7.0",
     "globals": "17.7.0",
-    "html-validate": "10.10.0",
+    "html-validate": "11.5.6",
     "prettier": "3.9.5",
     "stylelint": "17.14.0",
     "stylelint-config-standard": "40.0.0"
