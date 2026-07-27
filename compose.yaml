@@ -1,0 +1,90 @@
+services:
+  llama:
+    image: "${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b10143@sha256:a576442ad3649c0b5ea74e20ad29a17c121117f32607cfe59ff27cc38066f874}"
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    environment:
+      LLAMA_CACHE: /models
+
+    volumes:
+      - llama-model-cache:/models
+
+    command:
+      - -hf
+      - "${MODEL_GGUF:-LiquidAI/LFM2.5-VL-450M-GGUF:Q4_K_M}"
+      - --alias
+      - "${API_MODEL:-LiquidAI/LFM2.5-VL-450M}"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --threads
+      - "${THREADS:-4}"
+      - --threads-batch
+      - "${THREADS_BATCH:-4}"
+      - --threads-http
+      - "${THREADS_HTTP:-2}"
+      - --parallel
+      - "${CONCURRENCY:-2}"
+      - --ctx-size
+      - "${CTX_SIZE:-512}"
+      - --batch-size
+      - "${BATCH_SIZE:-256}"
+      - --ubatch-size
+      - "${UBATCH_SIZE:-256}"
+      - --mtmd-batch-max-tokens
+      - "${MTMD_BATCH_MAX_TOKENS:-128}"
+      - --image-min-tokens
+      - "${IMAGE_MIN_TOKENS:-32}"
+      - --image-max-tokens
+      - "${IMAGE_TOKENS:-64}"
+      - --gpu-layers
+      - "0"
+      - --no-mmproj-offload
+
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 15s
+
+  backend:
+    build: .
+
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+
+    depends_on:
+      llama:
+        condition: service_healthy
+
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      VLM_URL: http://llama:8080/v1
+      DEVICE: cpu
+      MODEL_GGUF: "${MODEL_GGUF:-LiquidAI/LFM2.5-VL-450M-GGUF:Q4_K_M}"
+      API_MODEL: "${API_MODEL:-LiquidAI/LFM2.5-VL-450M}"
+      THREADS: "${THREADS:-4}"
+      CONCURRENCY: "${CONCURRENCY:-2}"
+      PREPROCESS_CONCURRENCY: "${PREPROCESS_CONCURRENCY:-2}"
+      REQUEST_TIMEOUT: "${REQUEST_TIMEOUT:-300}"
+      START_TIMEOUT: "${START_TIMEOUT:-600}"
+
+    ports:
+      - "${BACKEND_BIND_ADDRESS:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+volumes:
+  llama-model-cache:
