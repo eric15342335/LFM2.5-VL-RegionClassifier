@@ -73,8 +73,8 @@ class Settings:
     crop_padding: float = float(os.getenv("CROP_PADDING", "0.08"))
     image_side: int = int(os.getenv("IMAGE_SIDE", "384"))
     jpeg_quality: int = int(os.getenv("JPEG_QUALITY", "88"))
-    max_upload_bytes: int = int(os.getenv("MAX_BYTES", "15000000"))
-    max_image_pixels: int = int(os.getenv("MAX_IMAGE_PIXELS", "25000000"))
+    max_upload_bytes: int = int(os.getenv("MAX_BYTES", str(100 * 1024 * 1024)))
+    max_image_pixels: int = int(os.getenv("MAX_IMAGE_PIXELS", str(40_000_000)))
     image_session_ttl: int = int(os.getenv("IMAGE_SESSION_TTL", "900"))
     image_session_cache_bytes: int = int(
         os.getenv("IMAGE_SESSION_CACHE_BYTES", str(256 * 1024 * 1024))
@@ -92,10 +92,12 @@ class Settings:
     cors_origins: tuple[str, ...] = _env_list("CORS_ORIGINS", "")
     prompt: str = os.getenv(
         "PROMPT",
-        "Name the single main physical object in this image. Reply with only its "
-        "common English noun phrase, lowercase, one to four words. No article, "
-        "punctuation, explanation, brand, scene, material, or adjective unless "
-        "needed to identify the object. If unclear, reply unknown.",
+        "Name the single main visible subject in this image. "
+        "The subject may be a person, animal, body part, or object. "
+        "Reply with only the most specific common English noun phrase, "
+        "lowercase, one to four words. If a whole human is the main subject, "
+        "reply person. No article, punctuation, explanation, brand, scene, "
+        "material, or unsupported adjective. If unclear, reply unknown.",
     )
 
     def validate(self) -> None:
